@@ -3,10 +3,189 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ETH 价格表单</title>
+<title>ETH 价格提醒配置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0f172a; color: #e2e8f0; min-height: 100vh;
+    display: flex; justify-content: center; padding: 24px 16px;
+  }
+  .card {
+    width: 100%; max-width: 420px; background: #1e293b;
+    border-radius: 16px; padding: 28px 24px; box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { font-size: 13px; color: #94a3b8; margin-bottom: 24px; }
+  .field { margin-bottom: 18px; }
+  .field label { display: block; font-size: 14px; margin-bottom: 6px; color: #cbd5e1; }
+  .field input {
+    width: 100%; padding: 12px 14px; font-size: 16px; border-radius: 10px;
+    border: 1px solid #334155; background: #0f172a; color: #fff; outline: none;
+  }
+  .field input:focus { border-color: #38bdf8; }
+  .hint { font-size: 12px; color: #64748b; margin-top: 5px; }
+  .btn {
+    width: 100%; padding: 14px; font-size: 16px; font-weight: 600;
+    border: none; border-radius: 10px; background: #38bdf8; color: #0f172a;
+    cursor: pointer; margin-top: 8px;
+  }
+  .btn:active { transform: scale(.98); }
+  .btn:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; }
+  .msg { margin-top: 14px; font-size: 13px; text-align: center; min-height: 18px; }
+  .ok { color: #4ade80; } .err { color: #f87171; }
+  .token-box { border-top: 1px solid #334155; margin-top: 22px; padding-top: 18px; }
+  .token-box summary { font-size: 13px; color: #94a3b8; cursor: pointer; }
+  .token-box input { margin-top: 10px; }
+  .price-now { text-align: center; font-size: 13px; color: #94a3b8; margin-bottom: 20px; }
+  .price-now b { color: #4ade80; font-size: 20px; }
+</style>
 </head>
 <body>
-<h1>ETH 价格配置表单</h1>
-<p>页面准备中，请稍后访问。</p>
+<div class="card">
+  <h1>ETH 价格提醒配置</h1>
+  <div class="sub">云端监控每 10 分钟检查一次，触发后推送微信</div>
+  <div class="price-now" id="priceNow">当前价格加载中...</div>
+
+  <div class="field">
+    <label>向上突破价（USD）</label>
+    <input type="number" id="up" placeholder="例如 2720" step="1">
+    <div class="hint">ETH 涨到该价格及以上时推送提醒</div>
+  </div>
+  <div class="field">
+    <label>向下跌破价（USD）</label>
+    <input type="number" id="down" placeholder="例如 2650" step="1">
+    <div class="hint">ETH 跌到该价格及以下时推送提醒</div>
+  </div>
+
+  <button class="btn" id="saveBtn" onclick="saveConfig()">保存配置</button>
+  <div class="msg" id="msg"></div>
+
+  <details class="token-box">
+    <summary>首次使用：设置访问令牌（Token）</summary>
+    <input type="password" id="token" placeholder="粘贴 GitHub Personal Access Token" oninput="localStorage.setItem('github_token', this.value)">
+    <div class="hint">生成位置：GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens（仓库读写权限）</div>
+  </details>
+</div>
+
+<script>
+var OWNER = "ad123cun";        // GitHub 用户名
+var REPO = "eth-price-monitor";  // 仓库名
+var FILE = "price.json";        // 配置文件
+var RAW_URL = "https://raw.githubusercontent.com/" + OWNER + "/" + REPO + "/main/" + FILE;
+var API_BASE = "https://api.github.com/repos/" + OWNER + "/" + REPO + "/contents/" + FILE;
+
+function getToken() {
+  var t = document.getElementById('token').value;
+  if (!t) t = localStorage.getItem('github_token') || '';
+  if (t) document.getElementById('token').value = t;
+  return t;
+}
+
+function setMsg(text, cls) {
+  var m = document.getElementById('msg');
+  m.textContent = text;
+  m.className = 'msg ' + (cls || '');
+}
+
+// 加载当前配置（私有仓库需带令牌读取）
+function loadConfig() {
+  var token = getToken();
+  if (!token) {
+    document.getElementById('up').value = '';
+    document.getElementById('down').value = '';
+    setMsg('填入令牌后自动加载当前配置', 'err');
+    return;
+  }
+  fetch(API_BASE, { headers: ghHeaders() })
+    .then(function (r) { return r.json(); })
+    .then(function (info) {
+      if (!info.content) throw new Error('配置读取失败');
+      var cfg = JSON.parse(decodeURIComponent(escape(atob(info.content))));
+      document.getElementById('up').value = cfg.up;
+      document.getElementById('down').value = cfg.down;
+      setMsg('当前配置已加载');
+    })
+    .catch(function () {
+      document.getElementById('up').value = '';
+      document.getElementById('down').value = '';
+      setMsg('仓库尚未初始化或网络异常', 'err');
+    });
+}
+
+function ghHeaders(extra) {
+  var token = getToken();
+  return Object.assign({
+    'Authorization': 'Bearer ' + token,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  }, extra || {});
+}
+
+window.addEventListener('load', function () { loadConfig(); });
+
+// 加载当前 ETH 价格（CoinGecko，国内可访问）
+fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd')
+  .then(function (r) { return r.json(); })
+  .then(function (d) { document.getElementById('priceNow').innerHTML = '当前 ETH 价格：<b>$' + d.ethereum.usd + '</b>'; })
+  .catch(function () { document.getElementById('priceNow').textContent = '当前价格获取失败（不影响保存）'; });
+
+function b64(s) {
+  return btoa(unescape(encodeURIComponent(s)));
+}
+
+function saveConfig() {
+  var token = getToken();
+  if (!token) {
+    setMsg('请先展开上方"首次使用"填入 GitHub 令牌', 'err');
+    return;
+  }
+  var up = parseFloat(document.getElementById('up').value);
+  var down = parseFloat(document.getElementById('down').value);
+  if (!(up > 0) || !(down > 0)) {
+    setMsg('请输入有效的价格数字', 'err');
+    return;
+  }
+  var btn = document.getElementById('saveBtn');
+  btn.disabled = true; btn.textContent = '保存中...';
+  setMsg('');
+
+  var payload = JSON.stringify({ up: up, down: down });
+  var encoded = b64(payload);
+
+  // 先 GET 拿当前 sha（文件不存在则首次创建）
+  fetch(API_BASE, { headers: ghHeaders() })
+    .then(function (r) { return r.json(); })
+    .then(function (info) {
+      return info.sha || null;
+    })
+    .then(function (sha) {
+      var body = {
+        message: 'update eth price triggers',
+        content: encoded
+      };
+      if (sha) body.sha = sha;
+      return fetch(API_BASE, {
+        method: 'PUT',
+        headers: ghHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body)
+      });
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+      if (res.content || res.commit) {
+        setMsg('保存成功！云端监控将在 10 分钟内生效', 'ok');
+      } else {
+        setMsg('保存失败：' + (res.message || JSON.stringify(res)), 'err');
+      }
+    })
+    .catch(function (e) {
+      setMsg('保存失败：' + e.message, 'err');
+    })
+    .finally(function () {
+      btn.disabled = false; btn.textContent = '保存配置';
+    });
+}
+</script>
 </body>
 </html>
