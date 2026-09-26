@@ -95,10 +95,12 @@
 </div>
 
 <script>
-var OWNER = "ad123cun";        // GitHub 用户名
-var REPO = "eth-price-monitor";  // 仓库名
-var FILE = "price.json";        // 配置文件
-var API_BASE = "https://api.github.com/repos/" + OWNER + "/" + REPO + "/contents/" + FILE;
+var OWNER = "ad123cun";
+var PUBLIC_REPO = "eth-price-form";     // 公开仓：Cloudflare Worker 配置源（保存后 Worker 约 2 分钟内读取生效）
+var PRIVATE_REPO = "eth-price-monitor"; // 私有仓：兼容旧 GitHub Actions
+var FILE = "price.json";
+
+function apiUrl(repo) { return "https://api.github.com/repos/" + OWNER + "/" + repo + "/contents/" + FILE; }
 
 function getToken() {
   var t = document.getElementById('token').value;
@@ -123,26 +125,6 @@ function fillCfg(cfg) {
   document.getElementById('option_band').value = cfg.option_band || 50;
 }
 
-// 加载当前配置（私有仓库需带令牌读取）
-function loadConfig() {
-  var token = getToken();
-  if (!token) {
-    setMsg('填入令牌后自动加载当前配置', 'err');
-    return;
-  }
-  fetch(API_BASE, { headers: ghHeaders() })
-    .then(function (r) { return r.json(); })
-    .then(function (info) {
-      if (!info.content) throw new Error('配置读取失败');
-      var cfg = JSON.parse(decodeURIComponent(escape(atob(info.content))));
-      fillCfg(cfg);
-      setMsg('当前配置已加载');
-    })
-    .catch(function () {
-      setMsg('仓库尚未初始化或网络异常', 'err');
-    });
-}
-
 function ghHeaders(extra) {
   var token = getToken();
   return Object.assign({
@@ -150,6 +132,31 @@ function ghHeaders(extra) {
     'Accept': 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28'
   }, extra || {});
+}
+
+// 加载当前配置：优先匿名读公开仓（无需令牌），失败再读私有仓
+function loadConfig() {
+  var token = getToken();
+  fetch(apiUrl(PUBLIC_REPO))
+    .then(function (r) { return r.json(); })
+    .then(function (info) {
+      if (!info.content) throw new Error('public empty');
+      var cfg = JSON.parse(decodeURIComponent(escape(atob(info.content))));
+      fillCfg(cfg);
+      setMsg('当前配置已加载（来自公开仓）');
+    })
+    .catch(function () {
+      if (!token) { setMsg('填入令牌后自动加载当前配置', 'err'); return; }
+      fetch(apiUrl(PRIVATE_REPO), { headers: ghHeaders() })
+        .then(function (r) { return r.json(); })
+        .then(function (info) {
+          if (!info.content) throw new Error('config read fail');
+          var cfg = JSON.parse(decodeURIComponent(escape(atob(info.content))));
+          fillCfg(cfg);
+          setMsg('当前配置已加载（来自私有仓）');
+        })
+        .catch(function () { setMsg('仓库尚未初始化或网络异常', 'err'); });
+    });
 }
 
 window.addEventListener('load', function () { loadConfig(); });
@@ -162,8 +169,23 @@ fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_cur
   })
   .catch(function () { document.getElementById('priceNow').textContent = '当前价格获取失败（不影响保存）'; });
 
-function b64(s) {
-  return btoa(unescape(encodeURIComponent(s)));
+function b64(s) { return btoa(unescape(encodeURIComponent(s))); }
+
+// 单仓写入：GET sha -> PUT
+function putRepo(repo, merged) {
+  return fetch(apiUrl(repo), { headers: ghHeaders() })
+    .then(function (r) { return r.json(); })
+    .then(function (info) {
+      var body = { message: 'update price triggers', content: b64(JSON.stringify(merged)) };
+      if (info.sha) body.sha = info.sha;
+      return fetch(apiUrl(repo), {
+        method: 'PUT',
+        headers: ghHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body)
+      });
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) { return !!(res.content || res.commit); });
 }
 
 function saveConfig() {
@@ -184,8 +206,8 @@ function saveConfig() {
   btn.disabled = true; btn.textContent = '保存中...';
   setMsg('');
 
-  // 先 GET 当前配置，合并后写回，保留未在页面展示的字段
-  fetch(API_BASE, { headers: ghHeaders() })
+  // 合并旧配置，保留未在页面展示的字段
+  fetch(apiUrl(PRIVATE_REPO), { headers: ghHeaders() })
     .then(function (r) { return r.json(); })
     .then(function (info) {
       var old = {};
@@ -199,31 +221,19 @@ function saveConfig() {
       if (!merged.option_days_min) merged.option_days_min = 1;
       if (!merged.option_days_max) merged.option_days_max = 3;
       if (!merged.option_max_items) merged.option_max_items = 10;
-      var body = {
-        message: 'update price triggers',
-        content: b64(JSON.stringify(merged))
-      };
-      if (info.sha) body.sha = info.sha;
-      return fetch(API_BASE, {
-        method: 'PUT',
-        headers: ghHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(body)
-      });
+      // 并行写公开仓（Worker 配置源）与私有仓（旧 Actions 兼容）
+      return Promise.all([putRepo(PUBLIC_REPO, merged), putRepo(PRIVATE_REPO, merged)]);
     })
-    .then(function (r) { return r.json(); })
-    .then(function (res) {
-      if (res.content || res.commit) {
-        setMsg('保存成功！云端监控约 2 分钟内生效', 'ok');
+    .then(function (results) {
+      var ok = results.filter(Boolean).length;
+      if (ok > 0) {
+        setMsg(ok === 2 ? '保存成功！已同步公开仓与私有仓，云端监控约 2 分钟内生效' : '部分保存成功（' + ok + '/2），请检查令牌权限', ok === 2 ? 'ok' : 'err');
       } else {
-        setMsg('保存失败：' + (res.message || JSON.stringify(res)), 'err');
+        setMsg('保存失败，请检查令牌权限', 'err');
       }
     })
-    .catch(function (e) {
-      setMsg('保存失败：' + e.message, 'err');
-    })
-    .finally(function () {
-      btn.disabled = false; btn.textContent = '保存配置';
-    });
+    .catch(function (e) { setMsg('保存失败：' + e.message, 'err'); })
+    .finally(function () { btn.disabled = false; btn.textContent = '保存配置'; });
 }
 </script>
 </body>
