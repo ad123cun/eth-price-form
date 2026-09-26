@@ -1,0 +1,14 @@
+{
+  "btc": {
+    "up": 88000,
+    "down": 80000
+  },
+  "eth": {
+    "up": 2690,
+    "down": 2689
+  },
+  "option_band": 50,
+  "option_days_min": 1,
+  "option_days_max": 3,
+  "option_max_items": 10
+}
