@@ -149,19 +149,46 @@ function loadConfig() {
 
 window.addEventListener('load', function () { loadConfig(); });
 
-// 加载当前 5 币价格（CoinGecko，国内可访问）
-fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,xrp,bitget-token&vs_currencies=usd')
-  .then(function (r) { return r.json(); })
-  .then(function (d) {
-    document.getElementById('priceNow').innerHTML =
-      '当前价格：BTC <b>$' + d.bitcoin.usd + '</b> · ETH <b>$$ ' + d.ethereum.usd + '</b><br>' +
-      'SOL $' + d.solana.usd + ' · XRP $' + d.xrp.usd + ' · BGB $' + d['bitget-token'].usd;
-  })
-  .catch(function () { document.getElementById('priceNow').textContent = '当前价格莏取失败（不彗不界查找）'; });
+// 实时价格：多源兜底（OKX → Bybit → Gate.io → CoinGecko），国内可直连，每 60 秒自动刷新
+function pick(obj, path) { for (var i = 0; i < path.length; i++) obj = obj[path[i]]; return obj; }
+function fetchOne(url, path) {
+  return fetch(url).then(function (r) { return r.json(); })
+    .then(function (j) { var v = parseFloat(pick(j, path)); if (!(v > 0)) throw new Error('bad'); return v; });
+}
+var BTC_SOURCES = [
+  { u: 'https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT', p: ['data', 0, 'last'] },
+  { u: 'https://api.bybit.com/v5/market/tickers/category=spot&symbol=BTCUSDT', p: ['result', 'list', 0, 'lastPrice'] },
+  { u: 'https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT', p: [0, 'last'] },
+  { u: 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd', p: ['bitcoin', 'usd'] }
+];
+var ETH_SOURCES = [
+  { u: 'https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT', p: ['data', 0, 'last'] },
+  { u: 'https://api.bybit.com/v5/market/tickers?category=spot&symbol=ETHUSDT', p: ['result', 'list', 0, 'lastPrice'] },
+  { u: 'https://api.gateio.ws/api/v4/spot/tickers?currency_pair=ETH_USDT', p: [0, 'last'] },
+  { u: 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd', p: ['ethereum', 'usd'] }
+];
+function getPrice(sources) {
+  return sources.reduce(function (acc, s) {
+    return acc.catch(function () { return fetchOne(s.u, s.p); });
+  }, Promise.reject(new Error('no source')));
+}
+function refreshPrice() {
+  Promise.all([getPrice(BTC_SOURCES), getPrice(ETH_SOURCES)])
+    .then(function (vals) {
+      document.getElementById('priceNow').innerHTML =
+        '当前价格：BTC <b>$' + vals[0].toLocaleString('en-US', { maximumFractionDigits: 0 }) +
+        '</b> · ETH <b>$' + vals[1].toLocaleString('en-US', { maximumFractionDigits: 1 }) + '</b>';
+    })
+    .catch(function () {
+      document.getElementById('priceNow').textContent = '当前价格获取失败（不影响保存）';
+    });
+}
+refreshPrice();
+setInterval(refreshPrice, 60000);
 
 function b64(s) { return btoa(unescape(encodeURIComponent(s))); }
 
-// 后吓到一次形到: GET sha -> PUT
+// 单仓写入：GET sha -> PUT
 function putRepo(repo, merged) {
   return fetch(apiUrl(repo), { headers: ghHeaders() })
     .then(function (r) { return r.json(); })
@@ -181,21 +208,21 @@ function putRepo(repo, merged) {
 function saveConfig() {
   var token = getToken();
   if (!token) {
-    setMsg('请啈展开上围字首次使用大填充 GitHub 令牌', 'err');
+    setMsg('请先展开上方"首次使用"填入 GitHub 令牌', 'err');
     return;
   }
   function num(id) { return parseFloat(document.getElementById(id).value); }
   var btc_change = num('btc_change'), eth_change = num('eth_change');
   var band = num('option_band');
   if (!(btc_change > 0) || !(eth_change > 0) || !(band > 0)) {
-    setMsg('请谓幥敌的数字！', 'err');
+    setMsg('请输入有效的数字', 'err');
     return;
   }
   var btn = document.getElementById('saveBtn');
   btn.disabled = true; btn.textContent = '保存中...';
   setMsg('');
 
-  // 合并旧配置，俓留未在页面展示网的字段
+  // 合并旧配置，保留未在页面展示的字段
   fetch(apiUrl(PRIVATE_REPO), { headers: ghHeaders() })
     .then(function (r) { return r.json(); })
     .then(function (info) {
@@ -209,13 +236,13 @@ function saveConfig() {
       if (!merged.option_days_min) merged.option_days_min = 1;
       if (!merged.option_days_max) merged.option_days_max = 3;
       if (!merged.option_max_items) merged.option_max_items = 10;
-      // 并行写公开仓（Worker 配置源）与����有仓（来肧 Actions 兼容）
+      // 并行写公开仓（Worker 配置源）与私有仓（旧 Actions 兼容）
       return Promise.all([putRepo(PUBLIC_REPO, merged), putRepo(PRIVATE_REPO, merged)]);
     })
     .then(function (results) {
       var ok = results.filter(Boolean).length;
       if (ok > 0) {
-        setMsg(ok === 2 ? '保存成功！已同步公开仓与私有仓，云端监控约 1 分钟内甯斈' : '部分保存成功（' + ok + '/2），请检查令牌权限', ok === 2 ? 'ok' : 'err');
+        setMsg(ok === 2 ? '保存成功！已同步公开仓与私有仓，云端监控约 1 分钟内生效' : '部分保存成功（' + ok + '/2），请检查令牌权限', ok === 2 ? 'ok' : 'err');
       } else {
         setMsg('保存失败，请检查令牌权限', 'err');
       }
